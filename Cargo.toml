@@ -1,0 +1,14 @@
+[package]
+name = "test3ds"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+citro3d = { path = "../citro3d-rs/citro3d" }
+citro3d-macros = { path = "../citro3d-rs/citro3d-macros" }
+citro3d-sys = { path = "../citro3d-rs/citro3d-sys" }
+ctru-rs = { git = "https://github.com/rust3ds/ctru-rs" }
+ctru-sys = { git = "https://github.com/rust3ds/ctru-rs", version = "0.5.0" }
+
+[package.metadata.cargo-3ds]
+romfs_dir = "romfs"
