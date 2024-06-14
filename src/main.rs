@@ -1,18 +1,18 @@
-use ctru::{prelude::*, services::gfx::TopScreen3D};
+#![feature(allocator_api,iter_collect_into,slice_pattern)]
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct Vec3 {
-    x: f32,
-    y: f32,
-    z: f32,
-}
+use core::slice::SlicePattern;
+use std::io::{stdout, Write};
 
-impl Vec3 {
-    const fn new(x: f32, y: f32, z: f32) -> Self {
-        Self { x, y, z }
-    }
-}
+use ctru::prelude::*;
+use ctru::services::gfx::{Flush, RawFrameBuffer, Screen, TopScreen3D};
+use citro3d::macros::include_shader;
+use citro3d::math::{AspectRatio, ClipPlanes, Projection, StereoDisplacement};
+use citro3d::render::{ClearFlags, DepthFormat};
+use citro3d::texenv;
+use citro3d::{attrib, buffer, render, shader};
+use glam::f32::{Vec3, Vec4};
+use citro3d::math::Matrix4;
+use gltf::Semantic;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -23,48 +23,57 @@ struct Vertex {
 
 static VERTICES: &[Vertex] = &[
     Vertex {
-        pos: Vec3::new(0.0, 0.5, -3.0),
+        pos: Vec3::new(0.0, 0.5, 0.0),
         color: Vec3::new(1.0, 0.0, 0.0),
     },
     Vertex {
-        pos: Vec3::new(-0.5, -0.5, -3.0),
+        pos: Vec3::new(-0.5, -0.5, 0.0),
         color: Vec3::new(0.0, 1.0, 0.0),
     },
     Vertex {
-        pos: Vec3::new(0.5, -0.5, -3.0),
+        pos: Vec3::new(0.5, -0.5, 0.0),
         color: Vec3::new(0.0, 0.0, 1.0),
     },
 ];
 
-static SHADER_BYTES: &[u8] = include_shader!("assets/vshader.pica");
+static DOC: &[u8] = include_bytes!("../assets/creature.glb");
+
+static SHADER_BYTES: &[u8] = include_shader!("../assets/vshader.pica");
 const CLEAR_COLOR: u32 = 0x68_B0_D8_FF;
+
+static LOWER_SCREEN_RES: (u16, u16) = (320u16, 240u16);
 
 fn main() {
     let apt = Apt::new().unwrap();
     let mut hid = Hid::new().unwrap();
-    let gfx = Gfx::new().unwrap();
+    let gfx = Gfx::with_formats_shared(ctru::services::gspgpu::FramebufferFormat::Rgba8, ctru::services::gspgpu::FramebufferFormat::Rgb565).unwrap();
     let _console = Console::new(gfx.bottom_screen.borrow_mut());
-    let mut instance = citro3d::Instance::new().expect("Failed to initilize citro3d");
+    println!("Initializing...");
+    let mut instance = match citro3d::Instance::new() {
+        Ok(this) => {
+            println!("Initialized citro3d...");
+            this
+        },
+        Err(e) => {
+            println!("ERROR: Failed to initilize citro3d!");
+            println!("\t{:?}",e);
+            panic!();
+        }
+    };
+    
 
     let top_screen = TopScreen3D::from(&gfx.top_screen);
 
     let (mut top_left, mut top_right) = top_screen.split_mut(); 
     let RawFrameBuffer { width, height, .. } = top_left.raw_framebuffer();
     let mut top_left_target = instance
-        .render_target(width, height, top_left, None)
+        .render_target(width, height, top_left, Some(DepthFormat::Depth16))
         .expect("failed to create render target");
 
     let RawFrameBuffer { width, height, .. } = top_right.raw_framebuffer();
     let mut top_right_target = instance
-        .render_target(width, height, top_right, None)
+        .render_target(width, height, top_right, Some(DepthFormat::Depth16))
         .expect("failed to create render target");
-
-    let mut bottom_screen = gfx.bottom_screen.borrow_mut();
-    let RawFrameBuffer { width, height, .. } = bottom_screen.raw_framebuffer();
-
-    let mut bottom_target = instance
-        .render_target(width, height, bottom_screen, None)
-        .expect("failed to create bottom screen render target");
 
     let shader = shader::Library::from_bytes(SHADER_BYTES).unwrap();
     let vertex_shader = shader.get(0).unwrap();
@@ -72,8 +81,9 @@ fn main() {
     let program = shader::Program::new(vertex_shader).unwrap();
     instance.bind_program(&program);
 
-    let mut vbo_data = Vec::with_capacity_in(VERTICES.len(), ctru::linear::LinearAllocator);
-    vbo_data.extend_from_slice(VERTICES);
+    let mut vbo_data = Vec::with_capacity_in(VERTICES.len()*2, ctru::linear::LinearAllocator);
+    let cur = VERTICES.iter();
+    vbo_data.extend(cur.clone().chain(cur.rev()));
 
     let mut buf_info = buffer::Info::new();
     let (attr_info, vbo_data) = prepare_vbos(&mut buf_info, &vbo_data);
@@ -88,8 +98,16 @@ fn main() {
 
     let projection_uniform_idx = program.get_uniform("projection").unwrap();
 
+
     println!("Hello, World!");
     println!("\x1b[29;16HPress Start to exit");
+
+    let mut model = Matrix4::identity();
+
+    let mut view = Matrix4::identity();
+
+    view.translate(0.0, 0.0, -4.0);
+    
 
     while apt.main_loop() {
         gfx.wait_for_vblank();
@@ -99,6 +117,38 @@ fn main() {
             break;
         }
 
+        // Fun deadzone handling
+        let (cx, cy) = 
+        { 
+            let cpos = hid.circlepad_position();
+
+            println!("\x1b[4;0H\x1b[2Krawx: {}, rawy: {}", cpos.0, cpos.1);
+
+            (match (cpos.0 as f32) / (i8::MAX as f32) {
+                -0.1 ..= 0.1 => 0.0,
+                a => a 
+            },
+            match (cpos.1 as f32) / (i8::MAX as f32) {
+                -0.1 ..= 0.1 => 0.0,
+                a => a 
+            })
+        };
+
+        view.translate(cx, 0.0 , cy);
+
+        let (tx, ty) =         { 
+            let tpos = hid.touch_position();
+
+            ((((tpos.0 as f32) / (LOWER_SCREEN_RES.0 as f32)) * 2.0) - 1.0,
+            (((tpos.1 as f32) / (LOWER_SCREEN_RES.1 as f32)) * 2.0) - 1.0)
+        };
+        
+        if hid.keys_down().contains(KeyPad::TOUCH) | hid.keys_held().contains(KeyPad::TOUCH) {
+            model.rotate_z(tx);
+            model.rotate_x(ty);
+        }    
+        print!("\x1b[5;0H\x1b[2Kcx: {}, cy: {}\r", cx, cy);
+        
         instance.render_frame_with(|instance| {
             let mut render_to = |target: &mut render::Target, projection| {
                 target.clear(ClearFlags::ALL, CLEAR_COLOR, 0);
@@ -117,13 +167,17 @@ fn main() {
             let Projections {
                 left_eye,
                 right_eye,
-                center,
+                _center,
             } = calculate_projections();
 
-            render_to(&mut top_left_target, &left_eye);
-            render_to(&mut top_right_target, &right_eye);
-            render_to(&mut bottom_target, &center);
+            let left_eye_mvp = left_eye * view * model; 
+            let right_eye_mvp = right_eye * view * model;
+
+            render_to(&mut top_left_target, &left_eye_mvp);
+            render_to(&mut top_right_target, &right_eye_mvp);
         });
+
+        stdout().flush().unwrap();
     }
 }
 
@@ -145,7 +199,7 @@ fn prepare_vbos<'a>(
         .add_loader(reg1, attrib::Format::Float, 3)
         .unwrap();
 
-    let buf_idx = buf_info.add(vbo_data, &attr_info).unwrap();
+    let buf_idx = buf_info.add( vbo_data, &attr_info).unwrap();
 
     (attr_info, buf_idx)
 }
@@ -153,7 +207,7 @@ fn prepare_vbos<'a>(
 struct Projections {
     left_eye: Matrix4,
     right_eye: Matrix4,
-    center: Matrix4,
+    _center: Matrix4,
 }
 
 fn calculate_projections() -> Projections {
@@ -176,12 +230,12 @@ fn calculate_projections() -> Projections {
         Projection::perspective(vertical_fov, AspectRatio::TopScreen, clip_planes)
             .stereo_matrices(left, right);
 
-    let center =
+    let _center =
         Projection::perspective(vertical_fov, AspectRatio::BottomScreen, clip_planes).into();
 
     Projections {
         left_eye,
         right_eye,
-        center,
+        _center,
     }
 }
